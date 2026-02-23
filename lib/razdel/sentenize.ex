@@ -81,26 +81,35 @@ defmodule Razdel.Sentenize do
   end
 
   defp build_parts_from_matches(text, matches) do
-    text_len = String.length(text)
+    text_size = byte_size(text)
 
     {parts, prev_stop} =
       Enum.reduce(matches, {[], 0}, fn {byte_start, byte_len}, {acc, prev_byte} ->
         chunk = binary_part(text, prev_byte, byte_start - prev_byte)
         delim = binary_part(text, byte_start, byte_len)
-        delim_char_start = String.length(binary_part(text, 0, byte_start))
-        delim_char_stop = delim_char_start + String.length(delim)
+        delim_stop = byte_start + byte_len
 
-        left_char_start = max(0, delim_char_start - @window)
-        left = String.slice(text, left_char_start, delim_char_start - left_char_start)
-        right_end = min(text_len, delim_char_stop + @window)
-        right = String.slice(text, delim_char_stop, right_end - delim_char_stop)
+        left_start = max(0, byte_start - @window * 3)
+        left = safe_binary_part(text, left_start, byte_start - left_start)
+        right_end = min(text_size, delim_stop + @window * 3)
+        right = safe_binary_part(text, delim_stop, right_end - delim_stop)
 
         split_ctx = build_split_context(left, delim, right)
-        {[split_ctx, chunk | acc], byte_start + byte_len}
+        {[split_ctx, chunk | acc], delim_stop}
       end)
 
-    final_chunk = binary_part(text, prev_stop, byte_size(text) - prev_stop)
+    final_chunk = binary_part(text, prev_stop, text_size - prev_stop)
     Enum.reverse([final_chunk | parts])
+  end
+
+  defp safe_binary_part(text, start, len) do
+    raw = binary_part(text, start, len)
+
+    if String.valid?(raw) do
+      raw
+    else
+      raw |> String.chunk(:valid) |> Enum.filter(&String.valid?/1) |> Enum.join()
+    end
   end
 
   defp build_split_context(left, delimiter, right) do

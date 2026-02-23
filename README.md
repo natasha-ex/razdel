@@ -47,6 +47,19 @@ Rules (in priority order):
 10. **close_bracket** — handle closing brackets
 11. **dash_right** — join dialogue dashes before lowercase words
 
+## Performance
+
+Benchmarked on the original test data (48,735 sentence texts, 208,995 token texts), Apple M5:
+
+| Operation  | Python (CPython 3.13) | Elixir (OTP 27) | Ratio         |
+| ---------- | --------------------: | --------------: | ------------- |
+| sentenize  |          77,000 /s    |     10,000 /s   | Python ~7.7×  |
+| tokenize   |         320,000 /s    |    131,000 /s   | Python ~2.4×  |
+
+```bash
+mix run bench/bench.exs
+```
+
 ## License
 
 MIT — Danila Poyarkov

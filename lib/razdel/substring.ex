@@ -10,32 +10,67 @@ defmodule Razdel.Substring do
         }
 
   @doc "Locates chunks within the original text, returning character offsets."
-  @spec locate(Enumerable.t(), String.t()) :: [t()]
-  def locate(chunks, text) do
-    graphemes = String.graphemes(text)
+  @spec locate([String.t()], String.t()) :: [t()]
+  def locate([], _text), do: []
 
-    chunks
-    |> Enum.reduce({0, graphemes, []}, fn chunk, {char_offset, remaining, acc} ->
-      chunk_graphemes = String.graphemes(chunk)
-      {skip, rest} = find_chunk(chunk_graphemes, remaining, 0)
-      start = char_offset + skip
-      stop = start + String.length(chunk)
-      rest_after = Enum.drop(rest, String.length(chunk))
-      sub = %__MODULE__{start: start, stop: stop, text: chunk}
-      {stop, rest_after, [sub | acc]}
+  def locate(chunks, text) do
+    byte_spans = find_byte_spans(chunks, text)
+    needed = byte_boundaries(byte_spans)
+    char_map = scan_char_offsets(text, needed)
+
+    Enum.map(byte_spans, fn {chunk, byte_start, byte_stop} ->
+      %__MODULE__{
+        start: Map.fetch!(char_map, byte_start),
+        stop: Map.fetch!(char_map, byte_stop),
+        text: chunk
+      }
     end)
-    |> elem(2)
-    |> Enum.reverse()
   end
 
-  defp find_chunk([], remaining, skip), do: {skip, remaining}
-  defp find_chunk(_chunk, [], skip), do: {skip, []}
+  defp find_byte_spans(chunks, text) do
+    text_size = byte_size(text)
 
-  defp find_chunk([ch | _] = chunk, [g | rest], skip) do
-    if ch == g do
-      {skip, [g | rest]}
-    else
-      find_chunk(chunk, rest, skip + 1)
-    end
+    {spans, _} =
+      Enum.reduce(chunks, {[], 0}, fn chunk, {acc, offset} ->
+        chunk_size = byte_size(chunk)
+
+        case :binary.match(text, chunk, scope: {offset, text_size - offset}) do
+          {pos, ^chunk_size} ->
+            {[{chunk, pos, pos + chunk_size} | acc], pos + chunk_size}
+
+          _ ->
+            {acc, offset}
+        end
+      end)
+
+    Enum.reverse(spans)
+  end
+
+  defp byte_boundaries(spans) do
+    spans
+    |> Enum.flat_map(fn {_, s, e} -> [s, e] end)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp scan_char_offsets(text, needed) do
+    needed_set = MapSet.new(needed)
+    max_needed = Enum.max(needed, fn -> 0 end)
+    walk_binary(text, 0, 0, max_needed, needed_set, %{})
+  end
+
+  defp walk_binary(_bin, byte_off, _char_off, max_needed, _needed, map)
+       when byte_off > max_needed do
+    map
+  end
+
+  defp walk_binary(<<>>, byte_off, char_off, _max, needed, map) do
+    if MapSet.member?(needed, byte_off), do: Map.put(map, byte_off, char_off), else: map
+  end
+
+  defp walk_binary(<<_::utf8, rest::binary>> = bin, byte_off, char_off, max, needed, map) do
+    map = if MapSet.member?(needed, byte_off), do: Map.put(map, byte_off, char_off), else: map
+    step = byte_size(bin) - byte_size(rest)
+    walk_binary(rest, byte_off + step, char_off + 1, max, needed, map)
   end
 end
