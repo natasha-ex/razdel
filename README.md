@@ -51,10 +51,12 @@ Rules (in priority order):
 
 Benchmarked on the original test data (48,735 sentence texts, 208,995 token texts), Apple M5:
 
-| Operation  | Python (CPython 3.13) | Elixir (OTP 27) | Ratio              |
-| ---------- | --------------------: | --------------: | ------------------ |
-| sentenize  |          78,000 /s    |     23,000 /s   | Python ~3.4×       |
-| tokenize   |         323,000 /s    |    363,000 /s   | **Elixir ~1.12×**  |
+| Operation  | Python (CPython 3.13) | Elixir (OTP 27) | Ratio             |
+| ---------- | --------------------: | --------------: | ----------------- |
+| sentenize  |          78,000 /s    |     23,000 /s   | Python ~3.4×      |
+| tokenize   |         323,000 /s    |    363,000 /s   | **Elixir ~1.1×**  |
+
+The sentenize gap is due to UTF-8 char-counting overhead in `Substring.locate` — the BEAM has no O(1) byte→char offset conversion. The split+segment core alone runs faster than Python.
 
 ```bash
 mix run bench/bench.exs

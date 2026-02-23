@@ -140,16 +140,18 @@ defmodule Razdel.Sentenize do
   end
 
   defp build_split_context(left, delimiter, right) do
+    {right_token, right_word} = scan_right(right)
+
     %{
       left: left,
       delimiter: delimiter,
       right: right,
-      left_token: last_token(left),
-      right_token: first_token(right),
-      left_pair_abbr: left_pair_abbr(left),
+      left_token: scan_last_token(left, nil),
+      right_token: right_token,
+      left_pair_abbr: scan_pair_abbr(left, nil, nil),
       right_space_prefix: space_prefix?(right),
       left_space_suffix: space_suffix?(left),
-      right_word: first_word(right),
+      right_word: right_word,
       buffer_tokens: nil
     }
   end
@@ -376,43 +378,59 @@ defmodule Razdel.Sentenize do
 
   # Token extraction via binary pattern matching
 
-  defp first_token(text), do: skip_spaces_then_token(text)
+  # Combined scan: returns {first_token, first_word} in one pass
+  defp scan_right(text), do: skip_spaces_for_right(text, nil)
 
-  defp last_token(text) do
-    scan_last_token(text, nil)
+  defp skip_spaces_for_right(<<c, rest::binary>>, word) when c in ~c" \t\n\r",
+    do: skip_spaces_for_right(rest, word)
+
+  defp skip_spaces_for_right(bin, word) do
+    {token, rest_after_token} = grab_token_raw(bin)
+
+    if token do
+      word = word || find_word_in_or_after(token, rest_after_token)
+      {token, word}
+    else
+      {nil, word}
+    end
   end
 
-  defp first_word(text), do: skip_to_word(text)
-
-  defp left_pair_abbr(text) do
-    scan_pair_abbr(text, nil, nil)
+  defp find_word_in_or_after(token, rest) do
+    if word_token?(token) do
+      token
+    else
+      skip_to_word(rest)
+    end
   end
 
-  # Skip whitespace, then grab first token (word | digits | single punct)
-  defp skip_spaces_then_token(<<c, rest::binary>>) when c in ~c" \t\n\r",
-    do: skip_spaces_then_token(rest)
+  defp word_token?(<<c::utf8, _::binary>>)
+       when c in ?a..?z or c in ?A..?Z or c in ?0..?9 or
+              c in 0x0410..0x044F or c == 0x0401 or c == 0x0451,
+       do: true
 
-  defp skip_spaces_then_token(bin), do: grab_token(bin, <<>>)
+  defp word_token?(_), do: false
 
-  defp grab_token(<<c::utf8, rest::binary>>, acc) when c in ?a..?z or c in ?A..?Z,
-    do: grab_token(rest, <<acc::binary, c::utf8>>)
+  defp grab_token_raw(bin), do: grab_token_raw(bin, <<>>)
 
-  defp grab_token(<<c::utf8, rest::binary>>, acc)
+  defp grab_token_raw(<<c::utf8, rest::binary>>, acc) when c in ?a..?z or c in ?A..?Z,
+    do: grab_token_raw(rest, <<acc::binary, c::utf8>>)
+
+  defp grab_token_raw(<<c::utf8, rest::binary>>, acc)
        when c in 0x0410..0x044F or c == 0x0401 or c == 0x0451,
-       do: grab_token(rest, <<acc::binary, c::utf8>>)
+       do: grab_token_raw(rest, <<acc::binary, c::utf8>>)
 
-  defp grab_token(<<c, rest::binary>>, acc) when c in ?0..?9,
-    do: grab_token(rest, <<acc::binary, c>>)
+  defp grab_token_raw(<<c, rest::binary>>, acc) when c in ?0..?9,
+    do: grab_token_raw(rest, <<acc::binary, c>>)
 
-  defp grab_token(<<?_, rest::binary>>, acc) when byte_size(acc) > 0,
-    do: grab_token(rest, <<acc::binary, ?_>>)
+  defp grab_token_raw(<<?_, rest::binary>>, acc) when byte_size(acc) > 0,
+    do: grab_token_raw(rest, <<acc::binary, ?_>>)
 
-  defp grab_token(_, acc) when byte_size(acc) > 0, do: acc
+  defp grab_token_raw(rest, acc) when byte_size(acc) > 0, do: {acc, rest}
 
-  defp grab_token(<<c::utf8, _::binary>>, <<>>) when c not in ~c" \t\n\r",
-    do: <<c::utf8>>
+  defp grab_token_raw(<<c::utf8, rest::binary>>, <<>>) when c not in ~c" \t\n\r",
+    do: {<<c::utf8>>, rest}
 
-  defp grab_token(_, <<>>), do: nil
+  defp grab_token_raw(rest, <<>>), do: {nil, rest}
 
   # Find first word (letters/digits) anywhere in text, skipping non-word chars
   defp skip_to_word(<<c::utf8, rest::binary>>) when c in ?a..?z or c in ?A..?Z,

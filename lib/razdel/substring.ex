@@ -25,9 +25,9 @@ defmodule Razdel.Substring do
 
     case :binary.match(text, chunk, scope: {byte_off, text_size - byte_off}) do
       {byte_pos, ^chunk_size} ->
-        gap_chars = char_count(text, byte_off, byte_pos - byte_off)
+        gap_chars = char_count(byte_pos - byte_off, text, byte_off)
         char_start = char_off + gap_chars
-        chunk_chars = char_count(text, byte_pos, chunk_size)
+        chunk_chars = count_utf8(chunk, 0)
         char_stop = char_start + chunk_chars
         sub = %__MODULE__{start: char_start, stop: char_stop, text: chunk}
         do_locate(rest, text, text_size, byte_pos + chunk_size, char_stop, [sub | acc])
@@ -37,13 +37,13 @@ defmodule Razdel.Substring do
     end
   end
 
-  defp char_count(_text, _start, 0), do: 0
+  defp char_count(0, _bin, _start), do: 0
 
-  defp char_count(text, start, len) do
-    <<_::binary-size(start), slice::binary-size(len), _::binary>> = text
-    count_utf8_chars(slice, 0)
+  defp char_count(len, bin, start) do
+    <<_::binary-size(start), slice::binary-size(len), _::binary>> = bin
+    count_utf8(slice, 0)
   end
 
-  defp count_utf8_chars(<<>>, n), do: n
-  defp count_utf8_chars(<<_::utf8, rest::binary>>, n), do: count_utf8_chars(rest, n + 1)
+  defp count_utf8(<<>>, n), do: n
+  defp count_utf8(<<_::utf8, rest::binary>>, n), do: count_utf8(rest, n + 1)
 end
