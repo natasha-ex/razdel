@@ -9,16 +9,12 @@ defmodule Razdel.Tokenize do
 
   alias Razdel.{Punct, Substring}
 
-  @puncts "\\/!#$%&*+,.:;<=>?@^_`|~№…" <>
-            List.to_string(Punct.dashes()) <>
-            List.to_string(Punct.quotes()) <>
-            to_string(Enum.map(~c"([{)]}", &<<&1::utf8>>))
-
-  @atom_re Regex.compile!(
-             "(?P<ru>[а-яё]+)|(?P<lat>[a-z]+)|(?P<int>\\d+)|(?P<punct>[" <>
-               Regex.escape(@puncts) <> "])|(?P<other>\\S)",
-             "iu"
-           )
+  @punct_codepoints ("\\/!#$%&*+,.:;<=>?@^_`|~" <>
+                       List.to_string(Punct.dashes()) <>
+                       List.to_string(Punct.quotes()) <>
+                       to_string(Enum.map(~c"([{)]}", &<<&1::utf8>>)))
+                    |> String.to_charlist()
+                    |> Kernel.++([0x2116, 0x2026])
 
   @smile_re Regex.compile!("^" <> Punct.smiles_pattern() <> "$", "u")
 
@@ -47,53 +43,107 @@ defmodule Razdel.Tokenize do
   def tokenize(text) do
     atoms = scan_atoms(text)
     tokens = segment_tokens(atoms, text)
-    locate_tokens(tokens, text)
+    Substring.locate(tokens, text)
   end
 
-  # --- Atom scanner ---
+  # --- Atom scanner using binary pattern matching ---
 
-  defp scan_atoms(text) do
-    Regex.scan(@atom_re, text, return: :index)
-    |> Enum.map(fn matches ->
-      [{start, len} | groups] = matches
-      text_slice = binary_part(text, start, len)
-      type = detect_type(groups)
+  defp scan_atoms(text), do: scan_atoms(text, 0, [])
 
-      %{
-        start: start,
-        stop: start + len,
-        type: type,
-        text: text_slice,
-        normal: String.downcase(text_slice)
-      }
-    end)
+  defp scan_atoms(<<>>, _pos, acc), do: Enum.reverse(acc)
+
+  defp scan_atoms(<<c::utf8, _::binary>> = bin, pos, acc)
+       when c in 0x0430..0x044F or c == 0x0451 do
+    {token, rest, len} = grab_ru(bin)
+    atom = make_atom(pos, len, :ru, token)
+    scan_atoms(rest, pos + len, [atom | acc])
   end
 
-  # Named groups: ru, lat, int, punct, other
-  defp detect_type(groups) do
-    types = [:ru, :lat, :int, :punct, :other]
-
-    Enum.zip(types, groups)
-    |> Enum.find(fn {_type, {_start, len}} -> len > 0 end)
-    |> elem(0)
+  defp scan_atoms(<<c::utf8, _::binary>> = bin, pos, acc)
+       when c in 0x0410..0x042F or c == 0x0401 do
+    {token, rest, len} = grab_ru(bin)
+    atom = make_atom(pos, len, :ru, token)
+    scan_atoms(rest, pos + len, [atom | acc])
   end
+
+  defp scan_atoms(<<c, _::binary>> = bin, pos, acc) when c in ?a..?z or c in ?A..?Z do
+    {token, rest, len} = grab_lat(bin)
+    atom = make_atom(pos, len, :lat, token)
+    scan_atoms(rest, pos + len, [atom | acc])
+  end
+
+  defp scan_atoms(<<c, _::binary>> = bin, pos, acc) when c in ?0..?9 do
+    {token, rest, len} = grab_int(bin)
+    atom = make_atom(pos, len, :int, token)
+    scan_atoms(rest, pos + len, [atom | acc])
+  end
+
+  defp scan_atoms(<<c::utf8, rest::binary>>, pos, acc) when c in @punct_codepoints do
+    char = <<c::utf8>>
+    len = byte_size(char)
+    atom = make_atom(pos, len, :punct, char)
+    scan_atoms(rest, pos + len, [atom | acc])
+  end
+
+  # Whitespace — skip
+  defp scan_atoms(<<c, rest::binary>>, pos, acc) when c in ~c" \t\n\r" do
+    scan_atoms(rest, pos + 1, acc)
+  end
+
+  # Other non-whitespace
+  defp scan_atoms(<<c::utf8, rest::binary>>, pos, acc) do
+    char = <<c::utf8>>
+    len = byte_size(char)
+    atom = make_atom(pos, len, :other, char)
+    scan_atoms(rest, pos + len, [atom | acc])
+  end
+
+  defp make_atom(start, len, type, text) do
+    %{start: start, stop: start + len, type: type, text: text, normal: String.downcase(text)}
+  end
+
+  defp grab_ru(bin), do: grab_ru(bin, <<>>, 0)
+
+  defp grab_ru(<<c::utf8, rest::binary>>, acc, len)
+       when c in 0x0430..0x044F or c in 0x0410..0x042F or c == 0x0451 or c == 0x0401 do
+    char = <<c::utf8>>
+    grab_ru(rest, <<acc::binary, char::binary>>, len + byte_size(char))
+  end
+
+  defp grab_ru(rest, acc, len), do: {acc, rest, len}
+
+  defp grab_lat(bin), do: grab_lat(bin, <<>>, 0)
+
+  defp grab_lat(<<c, rest::binary>>, acc, len) when c in ?a..?z or c in ?A..?Z do
+    grab_lat(rest, <<acc::binary, c>>, len + 1)
+  end
+
+  defp grab_lat(rest, acc, len), do: {acc, rest, len}
+
+  defp grab_int(bin), do: grab_int(bin, <<>>, 0)
+
+  defp grab_int(<<c, rest::binary>>, acc, len) when c in ?0..?9 do
+    grab_int(rest, <<acc::binary, c>>, len + 1)
+  end
+
+  defp grab_int(rest, acc, len), do: {acc, rest, len}
 
   # --- Token segmenter ---
 
   defp segment_tokens([], _text), do: []
 
   defp segment_tokens([first | rest], text) do
+    all = [first | rest]
+
     {buffer, acc} =
       rest
       |> Enum.with_index(1)
       |> Enum.reduce({first.text, []}, fn {current, index}, {buffer, acc} ->
-        process_atom(current, index, atoms_list(first, rest), buffer, acc, text)
+        process_atom(current, index, all, buffer, acc, text)
       end)
 
     Enum.reverse([buffer | acc])
   end
-
-  defp atoms_list(first, rest), do: [first | rest]
 
   defp process_atom(current, index, atoms, buffer, acc, text) do
     prev = Enum.at(atoms, index - 1)
@@ -174,8 +224,6 @@ defmodule Razdel.Tokenize do
   end
 
   # --- 2112 pattern ---
-  # "2112" handles delimiters that can be on either side:
-  # "что-|то" (dash on left) or "что|-то" (dash on right)
 
   defp rule_2112(split, delimiter_check) do
     check_2112(split, delimiter_check, fn a, b -> a.type != :punct and b.type != :punct end)
@@ -214,10 +262,4 @@ defmodule Razdel.Tokenize do
 
   defp right_2(%{right_atoms: [_, second | _]}), do: second
   defp right_2(_), do: nil
-
-  # --- Location ---
-
-  defp locate_tokens(tokens, text) do
-    Substring.locate(tokens, text)
-  end
 end

@@ -14,63 +14,36 @@ defmodule Razdel.Substring do
   def locate([], _text), do: []
 
   def locate(chunks, text) do
-    byte_spans = find_byte_spans(chunks, text)
-    needed = byte_boundaries(byte_spans)
-    char_map = scan_char_offsets(text, needed)
-
-    Enum.map(byte_spans, fn {chunk, byte_start, byte_stop} ->
-      %__MODULE__{
-        start: Map.fetch!(char_map, byte_start),
-        stop: Map.fetch!(char_map, byte_stop),
-        text: chunk
-      }
-    end)
-  end
-
-  defp find_byte_spans(chunks, text) do
     text_size = byte_size(text)
-
-    {spans, _} =
-      Enum.reduce(chunks, {[], 0}, fn chunk, {acc, offset} ->
-        chunk_size = byte_size(chunk)
-
-        case :binary.match(text, chunk, scope: {offset, text_size - offset}) do
-          {pos, ^chunk_size} ->
-            {[{chunk, pos, pos + chunk_size} | acc], pos + chunk_size}
-
-          _ ->
-            {acc, offset}
-        end
-      end)
-
-    Enum.reverse(spans)
+    do_locate(chunks, text, text_size, 0, 0, [])
   end
 
-  defp byte_boundaries(spans) do
-    spans
-    |> Enum.flat_map(fn {_, s, e} -> [s, e] end)
-    |> Enum.uniq()
-    |> Enum.sort()
+  defp do_locate([], _text, _text_size, _byte_off, _char_off, acc), do: Enum.reverse(acc)
+
+  defp do_locate([chunk | rest], text, text_size, byte_off, char_off, acc) do
+    chunk_size = byte_size(chunk)
+
+    case :binary.match(text, chunk, scope: {byte_off, text_size - byte_off}) do
+      {byte_pos, ^chunk_size} ->
+        gap_chars = char_count(text, byte_off, byte_pos - byte_off)
+        char_start = char_off + gap_chars
+        chunk_chars = char_count(text, byte_pos, chunk_size)
+        char_stop = char_start + chunk_chars
+        sub = %__MODULE__{start: char_start, stop: char_stop, text: chunk}
+        do_locate(rest, text, text_size, byte_pos + chunk_size, char_stop, [sub | acc])
+
+      _ ->
+        do_locate(rest, text, text_size, byte_off, char_off, acc)
+    end
   end
 
-  defp scan_char_offsets(text, needed) do
-    needed_set = MapSet.new(needed)
-    max_needed = Enum.max(needed, fn -> 0 end)
-    walk_binary(text, 0, 0, max_needed, needed_set, %{})
+  defp char_count(_text, _start, 0), do: 0
+
+  defp char_count(text, start, len) do
+    <<_::binary-size(start), slice::binary-size(len), _::binary>> = text
+    count_utf8_chars(slice, 0)
   end
 
-  defp walk_binary(_bin, byte_off, _char_off, max_needed, _needed, map)
-       when byte_off > max_needed do
-    map
-  end
-
-  defp walk_binary(<<>>, byte_off, char_off, _max, needed, map) do
-    if MapSet.member?(needed, byte_off), do: Map.put(map, byte_off, char_off), else: map
-  end
-
-  defp walk_binary(<<_::utf8, rest::binary>> = bin, byte_off, char_off, max, needed, map) do
-    map = if MapSet.member?(needed, byte_off), do: Map.put(map, byte_off, char_off), else: map
-    step = byte_size(bin) - byte_size(rest)
-    walk_binary(rest, byte_off + step, char_off + 1, max, needed, map)
-  end
+  defp count_utf8_chars(<<>>, n), do: n
+  defp count_utf8_chars(<<_::utf8, rest::binary>>, n), do: count_utf8_chars(rest, n + 1)
 end

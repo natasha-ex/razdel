@@ -15,8 +15,8 @@ tok_texts = Enum.map(tok_lines, fn l -> l |> String.split("|") |> Enum.join() en
 
 IO.puts("Loaded #{length(sent_texts)} sentence texts, #{length(tok_texts)} token texts\n")
 
-Enum.each(Enum.take(sent_texts, 100), &Razdel.sentenize/1)
-Enum.each(Enum.take(tok_texts, 100), &Razdel.tokenize/1)
+Enum.each(Enum.take(sent_texts, 500), &Razdel.sentenize/1)
+Enum.each(Enum.take(tok_texts, 500), &Razdel.tokenize/1)
 
 for run <- 1..3 do
   {su, _} = :timer.tc(fn -> Enum.each(sent_texts, &Razdel.sentenize/1) end)

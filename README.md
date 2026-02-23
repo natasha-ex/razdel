@@ -51,10 +51,10 @@ Rules (in priority order):
 
 Benchmarked on the original test data (48,735 sentence texts, 208,995 token texts), Apple M5:
 
-| Operation  | Python (CPython 3.13) | Elixir (OTP 27) | Ratio         |
-| ---------- | --------------------: | --------------: | ------------- |
-| sentenize  |          77,000 /s    |     10,000 /s   | Python ~7.7×  |
-| tokenize   |         320,000 /s    |    131,000 /s   | Python ~2.4×  |
+| Operation  | Python (CPython 3.13) | Elixir (OTP 27) | Ratio        |
+| ---------- | --------------------: | --------------: | ------------ |
+| sentenize  |          77,000 /s    |     16,000 /s   | Python ~4.8× |
+| tokenize   |         320,000 /s    |    335,000 /s   | **Elixir ~1.05×** |
 
 ```bash
 mix run bench/bench.exs
