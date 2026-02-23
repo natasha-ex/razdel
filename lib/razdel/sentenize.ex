@@ -51,68 +51,67 @@ defmodule Razdel.Sentenize do
 
   # --- Splitter: binary scan instead of Regex.scan ---
 
-  @delimiters_set Punct.delimiters() |> Enum.map(&<<&1::utf8>>) |> MapSet.new()
+  @delimiters_codepoints Punct.delimiters() |> Enum.uniq()
 
-  defp split(text), do: split_scan(text, 0, byte_size(text), [])
-
-  defp split_scan(_text, pos, size, acc) when pos >= size do
-    Enum.reverse(acc)
+  defp split(text) do
+    size = byte_size(text)
+    scan(text, text, 0, size, [])
   end
 
-  defp split_scan(text, pos, size, acc) do
-    case scan_next_delimiter(text, pos, size) do
-      nil ->
-        chunk = binary_part(text, pos, size - pos)
-        Enum.reverse([chunk | acc])
+  # Walk the binary tail directly — no position-based slicing
+  defp scan(text, <<>>, chunk_start, size, acc) do
+    final = binary_part(text, chunk_start, size - chunk_start)
+    Enum.reverse([final | acc])
+  end
 
-      {delim_start, delim_len} ->
-        chunk = binary_part(text, pos, delim_start - pos)
-        delim = binary_part(text, delim_start, delim_len)
-        delim_stop = delim_start + delim_len
+  defp scan(text, <<c, d, tail::binary>>, chunk_start, size, acc)
+       when c in ~c"=:;" and d in ~c"()" do
+    pos = size - byte_size(<<c, d, tail::binary>>)
+    extra = count_repeated(tail, d)
+    delim_len = 2 + extra
+    emit_split(text, pos, delim_len, chunk_start, size, skip_bytes(tail, extra), acc)
+  end
 
-        left = safe_left(text, delim_start)
-        right = safe_right(text, delim_stop, size)
-        ctx = build_split_context(left, delim, right)
+  defp scan(text, <<c, ?-, d, tail::binary>>, chunk_start, size, acc)
+       when c in ~c"=:;" and d in ~c"()" do
+    pos = size - byte_size(<<c, ?-, d, tail::binary>>)
+    extra = count_repeated(tail, d)
+    delim_len = 3 + extra
+    emit_split(text, pos, delim_len, chunk_start, size, skip_bytes(tail, extra), acc)
+  end
 
-        if delim_stop >= size do
-          Enum.reverse(["", ctx, chunk | acc])
-        else
-          split_scan(text, delim_stop, size, [ctx, chunk | acc])
-        end
+  defp scan(text, <<c::utf8, rest::binary>>, chunk_start, size, acc)
+       when c in @delimiters_codepoints do
+    pos = size - byte_size(<<c::utf8, rest::binary>>)
+    delim_len = byte_size(<<c::utf8>>)
+    emit_split(text, pos, delim_len, chunk_start, size, rest, acc)
+  end
+
+  defp scan(text, <<_::utf8, rest::binary>>, chunk_start, size, acc) do
+    scan(text, rest, chunk_start, size, acc)
+  end
+
+  defp emit_split(text, delim_start, delim_len, chunk_start, size, rest_after, acc) do
+    chunk = binary_part(text, chunk_start, delim_start - chunk_start)
+    delim = binary_part(text, delim_start, delim_len)
+    delim_stop = delim_start + delim_len
+
+    left = safe_left(text, delim_start)
+    right = safe_right(text, delim_stop, size)
+    ctx = build_split_context(left, delim, right)
+
+    if rest_after == <<>> do
+      Enum.reverse(["", ctx, chunk | acc])
+    else
+      scan(text, rest_after, delim_stop, size, [ctx, chunk | acc])
     end
   end
-
-  defp scan_next_delimiter(text, pos, size) when pos < size do
-    <<_::binary-size(pos), rest::binary>> = text
-
-    case rest do
-      # Smile patterns: =) :) ;) =( :( ;( with repetition
-      <<c, d, tail::binary>> when c in ~c"=:;" and d in ~c"()" ->
-        smile_len = 2 + count_repeated(tail, d)
-        {pos, smile_len}
-
-      <<c, ?-, d, tail::binary>> when c in ~c"=:;" and d in ~c"()" ->
-        smile_len = 3 + count_repeated(tail, d)
-        {pos, smile_len}
-
-      <<c::utf8, _::binary>> ->
-        char = <<c::utf8>>
-
-        if MapSet.member?(@delimiters_set, char) do
-          {pos, byte_size(char)}
-        else
-          scan_next_delimiter(text, pos + byte_size(char), size)
-        end
-
-      <<>> ->
-        nil
-    end
-  end
-
-  defp scan_next_delimiter(_text, _pos, _size), do: nil
 
   defp count_repeated(<<c, rest::binary>>, c), do: 1 + count_repeated(rest, c)
   defp count_repeated(_, _), do: 0
+
+  defp skip_bytes(bin, 0), do: bin
+  defp skip_bytes(<<_, rest::binary>>, n), do: skip_bytes(rest, n - 1)
 
   defp safe_left(text, delim_start) do
     start = max(0, delim_start - @window_bytes)
@@ -380,16 +379,13 @@ defmodule Razdel.Sentenize do
   defp first_token(text), do: skip_spaces_then_token(text)
 
   defp last_token(text) do
-    text
-    |> String.trim_trailing()
-    |> extract_last_token()
+    scan_last_token(text, nil)
   end
 
   defp first_word(text), do: skip_to_word(text)
 
   defp left_pair_abbr(text) do
-    text = String.trim_trailing(text)
-    extract_pair_abbr(text)
+    scan_pair_abbr(text, nil, nil)
   end
 
   # Skip whitespace, then grab first token (word | digits | single punct)
@@ -445,139 +441,48 @@ defmodule Razdel.Sentenize do
   defp grab_word(_, acc) when byte_size(acc) > 0, do: acc
   defp grab_word(_, _), do: nil
 
-  # Extract last token from end of trimmed text
-  defp extract_last_token(<<>>), do: nil
+  # Forward scan — grab all tokens, return the last one found
+  defp scan_last_token(<<>>, last), do: last
 
-  defp extract_last_token(text) do
-    {token, _} = extract_trailing_token(text, byte_size(text))
-    token
+  defp scan_last_token(<<c, rest::binary>>, last) when c in ~c" \t\n\r",
+    do: scan_last_token(rest, last)
+
+  defp scan_last_token(bin, _last) do
+    {token, rest} = grab_any_token(bin)
+    if token, do: scan_last_token(rest, token), else: nil
   end
 
-  defp extract_trailing_token(text, size) when size > 0 do
-    # Walk backward to find last token boundary
-    {last_end, last_start} = find_last_token_range(text, size)
+  # Match pattern: (\w)\s*\.\s*(\w)\s*$ at end of left context
+  # Forward scan, track the last pair_abbr candidate seen
+  defp scan_pair_abbr(<<>>, _a, _b), do: nil
 
-    if last_start < last_end do
-      {binary_part(text, last_start, last_end - last_start), last_start}
-    else
-      {nil, 0}
+  defp scan_pair_abbr(<<c, rest::binary>>, a, b) when c in ~c" \t\n\r",
+    do: scan_pair_abbr(rest, a, b)
+
+  defp scan_pair_abbr(<<?., rest::binary>>, _a, b),
+    do: scan_pair_after_dot(rest, b)
+
+  defp scan_pair_abbr(<<c::utf8, rest::binary>>, _a, _b) do
+    scan_pair_abbr(rest, nil, <<c::utf8>>)
+  end
+
+  defp scan_pair_after_dot(<<>>, _b), do: nil
+
+  defp scan_pair_after_dot(<<c, rest::binary>>, b) when c in ~c" \t\n\r",
+    do: scan_pair_after_dot(rest, b)
+
+  defp scan_pair_after_dot(<<c::utf8, rest::binary>>, b) do
+    new_b = <<c::utf8>>
+
+    case rest_is_end?(rest) do
+      true -> if b, do: {b, new_b}
+      false -> scan_pair_abbr(rest, nil, new_b)
     end
   end
 
-  defp extract_trailing_token(_, _), do: {nil, 0}
-
-  defp find_last_token_range(text, size) do
-    # Find the end of the last token (skip trailing non-token chars from the right)
-    last_end = skip_trailing_spaces(text, size)
-
-    if last_end == 0 do
-      {0, 0}
-    else
-      # Check if the char at last_end-1 is a word/digit char
-      prefix = binary_part(text, 0, last_end)
-
-      case last_utf8_char(prefix) do
-        {cp, cp_size} when cp in ?a..?z or cp in ?A..?Z or cp in ?0..?9 ->
-          start = find_token_start(text, last_end - cp_size)
-          {last_end, start}
-
-        {cp, cp_size}
-        when cp in 0x0410..0x044F or cp == 0x0401 or cp == 0x0451 ->
-          start = find_token_start(text, last_end - cp_size)
-          {last_end, start}
-
-        {_cp, cp_size} ->
-          {last_end, last_end - cp_size}
-      end
-    end
-  end
-
-  defp skip_trailing_spaces(text, pos) when pos > 0 do
-    byte = :binary.at(text, pos - 1)
-
-    if byte in ~c" \t\n\r" do
-      skip_trailing_spaces(text, pos - 1)
-    else
-      pos
-    end
-  end
-
-  defp skip_trailing_spaces(_, 0), do: 0
-
-  defp find_token_start(text, pos) when pos > 0 do
-    prefix = binary_part(text, 0, pos)
-
-    case last_utf8_char(prefix) do
-      {cp, cp_size}
-      when cp in ?a..?z or cp in ?A..?Z or cp in ?0..?9 or cp in 0x0410..0x044F or
-             cp == 0x0401 or cp == 0x0451 ->
-        find_token_start(text, pos - cp_size)
-
-      _ ->
-        pos
-    end
-  end
-
-  defp find_token_start(_, 0), do: 0
-
-  defp last_utf8_char(<<>>), do: nil
-
-  defp last_utf8_char(bin) do
-    size = byte_size(bin)
-    # UTF-8 chars are 1-4 bytes; try from 1 back
-    try_last_char(bin, size, 1)
-  end
-
-  defp try_last_char(bin, size, n) when n <= 4 and n <= size do
-    candidate = binary_part(bin, size - n, n)
-
-    case candidate do
-      <<c::utf8>> -> {c, n}
-      _ -> try_last_char(bin, size, n + 1)
-    end
-  end
-
-  defp try_last_char(_, _, _), do: nil
-
-  # Extract pair abbreviation: pattern "X . Y" at end of left context
-  defp extract_pair_abbr(<<>>), do: nil
-
-  defp extract_pair_abbr(text) do
-    # Walk backward: find last word char (b), then ".", then another word char (a)
-    size = byte_size(text)
-    # Skip trailing spaces
-    pos = skip_trailing_spaces(text, size)
-    if pos == 0, do: nil, else: do_extract_pair(text, pos)
-  end
-
-  defp do_extract_pair(text, pos) do
-    # Grab last single word char
-    prefix_b = binary_part(text, 0, pos)
-
-    with {b_cp, b_size} <- last_utf8_char(prefix_b),
-         true <- word_char?(b_cp),
-         b = <<b_cp::utf8>>,
-         # Check for "." before it (with optional spaces)
-         pos2 = skip_trailing_spaces(text, pos - b_size),
-         true <- pos2 > 0,
-         true <- :binary.at(text, pos2 - 1) == ?.,
-         # Skip spaces before "."
-         pos3 = skip_trailing_spaces(text, pos2 - 1),
-         true <- pos3 > 0,
-         # Grab single word char
-         prefix_a = binary_part(text, 0, pos3),
-         {a_cp, _} <- last_utf8_char(prefix_a),
-         true <- word_char?(a_cp) do
-      {<<a_cp::utf8>>, b}
-    else
-      _ -> nil
-    end
-  end
-
-  defp word_char?(c) when c in ?a..?z or c in ?A..?Z, do: true
-  defp word_char?(c) when c in 0x0410..0x044F or c == 0x0401 or c == 0x0451, do: true
-  defp word_char?(c) when c in ?0..?9, do: true
-  defp word_char?(_), do: false
+  defp rest_is_end?(<<>>), do: true
+  defp rest_is_end?(<<c, rest::binary>>) when c in ~c" \t\n\r", do: rest_is_end?(rest)
+  defp rest_is_end?(_), do: false
 
   # Scan tokens from text (for buffer_tokens in list_item)
   defp scan_tokens(text), do: do_scan_tokens(text, [])
